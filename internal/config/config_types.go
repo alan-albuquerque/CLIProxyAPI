@@ -460,6 +460,10 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "soonest-reset".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
+	// ClaudeUsageRefreshInterval controls how often Claude OAuth quota signals are polled
+	// from Anthropic's usage endpoint. Default: 5m. "0" or a negative duration disables polling.
+	ClaudeUsageRefreshInterval string `yaml:"claude-usage-refresh-interval,omitempty" json:"claude-usage-refresh-interval,omitempty"`
+
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,

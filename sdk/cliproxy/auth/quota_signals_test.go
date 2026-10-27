@@ -683,3 +683,57 @@ func TestObserveResponseHeadersKeepsPrimaryWhenTruncatingAdditional(t *testing.T
 		t.Fatalf("snapshot size = %d, want %d", len(quota.Signals), maxQuotaSignalHeaders)
 	}
 }
+
+func TestManagerMergeQuotaSignalsKeepsOtherKeysAndSkipsNewerObservation(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	observedAt := time.Unix(1000, 0)
+	recoverAt := time.Unix(5000, 0)
+	auth := &Auth{
+		ID:       "claude-merge",
+		Provider: "claude",
+		Quota: QuotaState{
+			Exceeded:      true,
+			NextRecoverAt: recoverAt,
+			ObservedAt:    observedAt,
+			Signals: map[string]string{
+				"Retry-After": "30",
+				"Anthropic-Ratelimit-Unified-5h-Utilization": "0.5",
+			},
+		},
+	}
+	if _, errRegister := manager.Register(WithSkipPersist(ctx), auth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+
+	polledAt := observedAt.Add(time.Minute)
+	if !manager.MergeQuotaSignals(auth.ID, map[string]string{
+		"Anthropic-Ratelimit-Unified-5h-Utilization": "0.07",
+	}, polledAt) {
+		t.Fatal("MergeQuotaSignals() reported no change")
+	}
+	got, _ := manager.GetByID(auth.ID)
+	want := map[string]string{
+		"Retry-After": "30",
+		"Anthropic-Ratelimit-Unified-5h-Utilization": "0.07",
+	}
+	if !reflect.DeepEqual(got.Quota.Signals, want) || !got.Quota.ObservedAt.Equal(polledAt) {
+		t.Fatalf("quota after merge = %#v", got.Quota)
+	}
+	if !got.Quota.Exceeded || !got.Quota.NextRecoverAt.Equal(recoverAt) {
+		t.Fatalf("cooldown fields changed: %#v", got.Quota)
+	}
+
+	if manager.MergeQuotaSignals(auth.ID, map[string]string{
+		"Anthropic-Ratelimit-Unified-5h-Utilization": "0.9",
+	}, polledAt.Add(-time.Second)) {
+		t.Fatal("MergeQuotaSignals() applied a poll older than the current observation")
+	}
+	got, _ = manager.GetByID(auth.ID)
+	if !reflect.DeepEqual(got.Quota.Signals, want) || !got.Quota.ObservedAt.Equal(polledAt) {
+		t.Fatalf("quota after stale merge = %#v", got.Quota)
+	}
+	if manager.MergeQuotaSignals("missing", want, polledAt) {
+		t.Fatal("MergeQuotaSignals() reported a change for an unknown auth")
+	}
+}

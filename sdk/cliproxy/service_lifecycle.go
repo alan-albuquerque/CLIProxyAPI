@@ -101,6 +101,10 @@ func (s *Service) Run(ctx context.Context) error {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+		if usageInterval := claudeUsageRefreshInterval(cfg); usageInterval > 0 {
+			go newClaudeUsageRefresher(s.coreManager, s.currentConfig).run(ctx, usageInterval)
+			log.Infof("claude usage refresh started (interval=%s)", usageInterval)
+		}
 	}
 
 	if !homeEnabled {
