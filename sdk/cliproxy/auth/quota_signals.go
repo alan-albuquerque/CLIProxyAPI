@@ -225,3 +225,50 @@ func mergeQuotaObservation(target, source QuotaState) QuotaState {
 	target.Signals = source.Clone().Signals
 	return target
 }
+
+// MergeObservationSignals merges polled signals into the passive snapshot and
+// stamps it with observedAt. Unlike ObserveResponseHeadersForProvider, keys
+// absent from signals are kept. Nothing changes when the current snapshot was
+// observed after observedAt, so a poll never overwrites a newer response.
+// Cooldown and scheduling fields are never read or written here.
+func (q *QuotaState) MergeObservationSignals(signals map[string]string, observedAt time.Time) bool {
+	if q == nil || len(signals) == 0 || observedAt.IsZero() || q.ObservedAt.After(observedAt) {
+		return false
+	}
+	merged := make(map[string]string, len(q.Signals)+len(signals))
+	for key, value := range q.Signals {
+		merged[key] = value
+	}
+	for key, value := range signals {
+		merged[key] = value
+	}
+	q.Signals = merged
+	q.ObservedAt = observedAt
+	return true
+}
+
+// MergeQuotaSignals merges polled quota signals into the in-memory quota
+// snapshot of the auth with the given id and syncs the scheduler. The change is
+// not persisted. It reports false when the auth is unknown or already holds an
+// observation newer than observedAt.
+func (m *Manager) MergeQuotaSignals(id string, signals map[string]string, observedAt time.Time) bool {
+	if m == nil || id == "" || len(signals) == 0 {
+		return false
+	}
+	releaseMutation := m.lockAuthMutation(id)
+	defer releaseMutation()
+	m.mu.Lock()
+	auth := m.auths[id]
+	if auth == nil || !auth.Quota.MergeObservationSignals(signals, observedAt) {
+		m.mu.Unlock()
+		return false
+	}
+	auth.Generation++
+	auth.UpdatedAt = time.Now()
+	snapshot := auth.Clone()
+	m.mu.Unlock()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+	return true
+}
