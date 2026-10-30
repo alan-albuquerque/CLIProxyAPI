@@ -171,6 +171,10 @@ routing:
   # How often to poll Claude OAuth credential usage (5h/7d windows) so quota signals stay fresh
   # for soonest-reset and the auth-files quota view. Default 5m; "0" disables polling.
   # claude-usage-refresh-interval: "5m"
+  # soonest-reset stops giving a credential new sessions once its 5h or weekly utilization
+  # reaches these values (0-1). Sessions already bound to it stay. 1 turns that window off.
+  # soonest-reset-drain-at-5h: 0.95
+  # soonest-reset-drain-at-7d: 0.99
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # Sticky requests (including inherited and LCP bindings) also consume weighted credits
