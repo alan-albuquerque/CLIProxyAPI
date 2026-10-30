@@ -538,6 +538,12 @@ type RoutingConfig struct {
 	// from Anthropic's usage endpoint. Default: 5m. "0" or a negative duration disables polling.
 	ClaudeUsageRefreshInterval string `yaml:"claude-usage-refresh-interval,omitempty" json:"claude-usage-refresh-interval,omitempty"`
 
+	// SoonestResetSessionDrainAt and SoonestResetWeeklyDrainAt are the 5h and weekly utilization
+	// (0-1) at which soonest-reset stops giving a credential new sessions; bound sessions stay on it.
+	// Defaults: 0.95 and 0.99. 1 turns that window's draining off.
+	SoonestResetSessionDrainAt float64 `yaml:"soonest-reset-drain-at-5h,omitempty" json:"soonest-reset-drain-at-5h,omitempty"`
+	SoonestResetWeeklyDrainAt  float64 `yaml:"soonest-reset-drain-at-7d,omitempty" json:"soonest-reset-drain-at-7d,omitempty"`
+
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
 	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,

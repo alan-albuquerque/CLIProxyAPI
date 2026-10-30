@@ -61,6 +61,8 @@ type routingRuntimeState struct {
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
 	sessionAffinityRebindOn  string
+	soonestResetSessionDrain float64
+	soonestResetWeeklyDrain  float64
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -81,6 +83,8 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-first"
 	case "soonest-reset", "soonestreset", "sr":
 		state.strategy = "soonest-reset"
+		state.soonestResetSessionDrain = cfg.Routing.SoonestResetSessionDrainAt
+		state.soonestResetWeeklyDrain = cfg.Routing.SoonestResetWeeklyDrainAt
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -108,7 +112,10 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
 	case "soonest-reset":
-		selector = &coreauth.SoonestResetSelector{}
+		selector = &coreauth.SoonestResetSelector{
+			SessionDrainAt: state.soonestResetSessionDrain,
+			WeeklyDrainAt:  state.soonestResetWeeklyDrain,
+		}
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}

@@ -89,3 +89,20 @@ func TestSoonestResetRoutingSelector(t *testing.T) {
 		}
 	}
 }
+
+func TestSoonestResetRoutingSelectorDrainAt(t *testing.T) {
+	state := normalizedRoutingRuntimeState(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{
+			Strategy:                   "soonest-reset",
+			SoonestResetSessionDrainAt: 0.9,
+			SoonestResetWeeklyDrainAt:  0.98,
+		},
+	})
+	selector, ok := newRoutingSelector(state).(*coreauth.SoonestResetSelector)
+	if !ok {
+		t.Fatalf("selector type = %T, want *auth.SoonestResetSelector", newRoutingSelector(state))
+	}
+	if selector.SessionDrainAt != 0.9 || selector.WeeklyDrainAt != 0.98 {
+		t.Fatalf("drain = %v/%v, want 0.9/0.98", selector.SessionDrainAt, selector.WeeklyDrainAt)
+	}
+}
