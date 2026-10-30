@@ -53,7 +53,7 @@ func TestSoonestResetOrder(t *testing.T) {
 			auths: []*Auth{
 				{ID: "sat", Quota: claudeQuotaSignals("0.07", now.Add(5*day), "0", now.Add(2*hour))},
 				{ID: "tue", Quota: claudeQuotaSignals("0.40", now.Add(1*day), "0", now.Add(2*hour))},
-				{ID: "fri", Quota: claudeQuotaSignals("0.90", now.Add(4*day), "0", now.Add(2*hour))},
+				{ID: "fri", Quota: claudeQuotaSignals("0.80", now.Add(4*day), "0", now.Add(2*hour))},
 			},
 			want: []string{"tue", "fri", "sat"},
 		},
@@ -107,6 +107,48 @@ func TestSoonestResetOrder(t *testing.T) {
 			want: []string{"sooner", "later"},
 		},
 		{
+			name: "draining after room and unknown, before full",
+			auths: []*Auth{
+				{ID: "full", Quota: claudeQuotaSignals("0.2", now.Add(1*day), "1.0", now.Add(1*hour))},
+				{ID: "draining", Quota: claudeQuotaSignals("0.2", now.Add(1*day), "0.96", now.Add(2*hour))},
+				{ID: "unknown"},
+				{ID: "room", Quota: claudeQuotaSignals("0.0", now.Add(6*day), "0.01", now.Add(4*hour))},
+			},
+			want: []string{"room", "unknown", "draining", "full"},
+		},
+		{
+			name: "weekly utilization drains too",
+			auths: []*Auth{
+				{ID: "weekly-high", Quota: claudeQuotaSignals("0.995", now.Add(1*day), "0", now.Add(1*hour))},
+				{ID: "room", Quota: claudeQuotaSignals("0.5", now.Add(6*day), "0", now.Add(1*hour))},
+			},
+			want: []string{"room", "weekly-high"},
+		},
+		{
+			name: "draining auths ordered by lowest utilization",
+			auths: []*Auth{
+				{ID: "high", Quota: claudeQuotaSignals("0.2", now.Add(1*day), "0.98", now.Add(1*hour))},
+				{ID: "low", Quota: claudeQuotaSignals("0.2", now.Add(3*day), "0.96", now.Add(1*hour))},
+			},
+			want: []string{"low", "high"},
+		},
+		{
+			name: "below both thresholds is still room",
+			auths: []*Auth{
+				{ID: "late", Quota: claudeQuotaSignals("0.1", now.Add(6*day), "0.1", now.Add(1*hour))},
+				{ID: "busy", Quota: claudeQuotaSignals("0.98", now.Add(1*day), "0.94", now.Add(1*hour))},
+			},
+			want: []string{"busy", "late"},
+		},
+		{
+			name: "past session reset ends draining",
+			auths: []*Auth{
+				{ID: "was-draining", Quota: claudeQuotaSignals("0.2", now.Add(1*day), "0.99", now.Add(-time.Minute))},
+				{ID: "later", Quota: claudeQuotaSignals("0.2", now.Add(6*day), "0.1", now.Add(1*hour))},
+			},
+			want: []string{"was-draining", "later"},
+		},
+		{
 			name:  "no signals falls back to ID order",
 			auths: []*Auth{{ID: "b"}, {ID: "a"}, {ID: "c"}},
 			want:  []string{"a", "b", "c"},
@@ -115,7 +157,7 @@ func TestSoonestResetOrder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := soonestResetIDs(soonestResetOrder(tt.auths, now))
+			got := soonestResetIDs(soonestResetOrder(tt.auths, now, defaultSoonestResetDrain))
 			if len(got) != len(tt.want) {
 				t.Fatalf("order = %v, want %v", got, tt.want)
 			}
@@ -138,9 +180,40 @@ func TestSoonestResetOrder_RejectedStatusIsFull(t *testing.T) {
 		{ID: "rejected", Quota: rejected},
 		{ID: "ok", Quota: claudeQuotaSignals("0.5", now.Add(48*time.Hour), "", time.Time{})},
 	}
-	got := soonestResetIDs(soonestResetOrder(auths, now))
+	got := soonestResetIDs(soonestResetOrder(auths, now, defaultSoonestResetDrain))
 	if got[0] != "ok" {
 		t.Fatalf("order = %v, want ok first", got)
+	}
+}
+
+func TestSoonestResetSelectorDrainAt(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auths := []*Auth{
+		{ID: "late", Quota: claudeQuotaSignals("0.1", now.Add(96*time.Hour), "0.1", now.Add(time.Hour))},
+		{ID: "soon", Quota: claudeQuotaSignals("0.97", now.Add(20*time.Hour), "0.96", now.Add(time.Hour))},
+	}
+	tests := []struct {
+		name     string
+		selector SoonestResetSelector
+		want     string
+	}{
+		{name: "zero uses the defaults", selector: SoonestResetSelector{}, want: "late"},
+		{name: "one turns the 5h window off", selector: SoonestResetSelector{SessionDrainAt: 1}, want: "soon"},
+		{name: "custom weekly threshold", selector: SoonestResetSelector{SessionDrainAt: 1, WeeklyDrainAt: 0.9}, want: "late"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+			if err != nil {
+				t.Fatalf("Pick() error = %v", err)
+			}
+			if got.ID != tt.want {
+				t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, tt.want)
+			}
+		})
 	}
 }
 
@@ -196,5 +269,39 @@ func TestSessionAffinitySelector_SoonestResetFallbackBindsAndSticks(t *testing.T
 	}
 	if second.ID != "soon" {
 		t.Fatalf("second Pick() auth.ID = %q, want soon (affinity)", second.ID)
+	}
+}
+
+func TestSessionAffinitySelector_SoonestResetDrainingKeepsBoundSessions(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &SoonestResetSelector{},
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "late", Quota: claudeQuotaSignals("0.0", now.Add(144*time.Hour), "0.01", now.Add(4*time.Hour))},
+		{ID: "soon", Quota: claudeQuotaSignals("0.6", now.Add(72*time.Hour), "0.5", now.Add(2*time.Hour))},
+	}
+	bound := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_11111111-2222-3333-4444-555555555555"}}`),
+	}
+	if first, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", bound, auths); err != nil || first.ID != "soon" {
+		t.Fatalf("first Pick() = %v, %v; want soon", first, err)
+	}
+
+	// "soon" nears its 5h limit: the bound session stays, a new session goes to "late".
+	auths[1].Quota = claudeQuotaSignals("0.6", now.Add(72*time.Hour), "0.96", now.Add(2*time.Hour))
+	if again, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", bound, auths); err != nil || again.ID != "soon" {
+		t.Fatalf("bound Pick() = %v, %v; want soon (affinity)", again, err)
+	}
+	fresh := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_66666666-7777-8888-9999-000000000000"}}`),
+	}
+	if other, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", fresh, auths); err != nil || other.ID != "late" {
+		t.Fatalf("new session Pick() = %v, %v; want late", other, err)
 	}
 }
