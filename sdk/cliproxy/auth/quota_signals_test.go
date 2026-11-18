@@ -737,3 +737,42 @@ func TestManagerMergeQuotaSignalsKeepsOtherKeysAndSkipsNewerObservation(t *testi
 		t.Fatal("MergeQuotaSignals() reported a change for an unknown auth")
 	}
 }
+
+func TestClearRecoveredCredentialQuotaDropsRejectedSignals(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "claude-recovered", Provider: "claude", Metadata: map[string]any{"access_token": "tok"}}
+	if _, errRegister := manager.Register(WithSkipPersist(ctx), auth); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	if cleared, _ := manager.ClearRecoveredCredentialQuota(ctx, auth.ID); cleared {
+		t.Fatal("cleared an auth without a cooldown")
+	}
+
+	manager.mu.Lock()
+	live := manager.auths[auth.ID]
+	live.Unavailable = true
+	live.Status = StatusError
+	live.Quota.Exceeded = true
+	live.Quota.Reason = "credential_quota"
+	live.Quota.NextRecoverAt = time.Now().Add(45 * time.Hour)
+	live.Quota.Signals = map[string]string{
+		"Retry-After":                           "165122",
+		"Anthropic-Ratelimit-Unified-Status":    "rejected",
+		"Anthropic-Ratelimit-Unified-7d-Status": "allowed",
+	}
+	manager.mu.Unlock()
+
+	cleared, errClear := manager.ClearRecoveredCredentialQuota(ctx, auth.ID)
+	if !cleared || errClear != nil {
+		t.Fatalf("ClearRecoveredCredentialQuota() = %v, %v, want true, nil", cleared, errClear)
+	}
+	got, _ := manager.GetByID(auth.ID)
+	if got.Quota.Exceeded || !got.Quota.NextRecoverAt.IsZero() || got.Unavailable || got.Status != StatusActive {
+		t.Fatalf("cooldown not cleared: quota=%+v unavailable=%v status=%v", got.Quota, got.Unavailable, got.Status)
+	}
+	want := map[string]string{"Anthropic-Ratelimit-Unified-7d-Status": "allowed"}
+	if !reflect.DeepEqual(got.Quota.Signals, want) {
+		t.Fatalf("Signals = %#v, want %#v", got.Quota.Signals, want)
+	}
+}
