@@ -6,10 +6,12 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -18,9 +20,10 @@ func TestClaudeUsageSignals(t *testing.T) {
 	fiveHourReset := strconv.FormatInt(time.Date(2026, 10, 27, 5, 10, 0, 0, time.UTC).Unix(), 10)
 	sevenDayReset := strconv.FormatInt(time.Date(2026, 10, 31, 19, 0, 0, 0, time.UTC).Unix(), 10)
 	tests := []struct {
-		name string
-		body string
-		want map[string]string
+		name    string
+		body    string
+		want    map[string]string
+		allowed bool
 	}{
 		{
 			name: "both windows",
@@ -30,6 +33,17 @@ func TestClaudeUsageSignals(t *testing.T) {
 				"Anthropic-Ratelimit-Unified-5h-Utilization": "0",
 				"Anthropic-Ratelimit-Unified-5h-Status":      "allowed",
 				"Anthropic-Ratelimit-Unified-5h-Reset":       fiveHourReset,
+				"Anthropic-Ratelimit-Unified-7d-Utilization": "0.07",
+				"Anthropic-Ratelimit-Unified-7d-Status":      "allowed",
+				"Anthropic-Ratelimit-Unified-7d-Reset":       sevenDayReset,
+			},
+			allowed: true,
+		},
+		{
+			name: "full per-model weekly window",
+			body: `{"five_hour":null,"seven_day":{"utilization":7.0,"resets_at":"2026-10-31T19:00:00.452320+00:00"},
+				"seven_day_opus":{"utilization":100,"resets_at":"2026-10-31T19:00:00+00:00"},"extra_usage":{"utilization":100}}`,
+			want: map[string]string{
 				"Anthropic-Ratelimit-Unified-7d-Utilization": "0.07",
 				"Anthropic-Ratelimit-Unified-7d-Status":      "allowed",
 				"Anthropic-Ratelimit-Unified-7d-Reset":       sevenDayReset,
@@ -52,16 +66,19 @@ func TestClaudeUsageSignals(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, errSignals := claudeUsageSignals([]byte(tt.body))
+			got, allowed, errSignals := claudeUsageSignals([]byte(tt.body))
 			if errSignals != nil {
 				t.Fatalf("claudeUsageSignals() error = %v", errSignals)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("claudeUsageSignals() = %#v, want %#v", got, tt.want)
 			}
+			if allowed != tt.allowed {
+				t.Fatalf("claudeUsageSignals() allowed = %v, want %v", allowed, tt.allowed)
+			}
 		})
 	}
-	if _, errSignals := claudeUsageSignals([]byte("not json")); errSignals == nil {
+	if _, _, errSignals := claudeUsageSignals([]byte("not json")); errSignals == nil {
 		t.Fatal("claudeUsageSignals() accepted invalid JSON")
 	}
 }
@@ -167,5 +184,72 @@ func TestClaudeUsageRefresherUpdatesOnlyEligibleClaudeOAuthAuths(t *testing.T) {
 	}
 	if len(seenTokens) != 2 || !called["Bearer tok-ok"] || !called["Bearer tok-fail"] {
 		t.Fatalf("usage endpoint called with %v, want only tok-ok and tok-fail", seenTokens)
+	}
+}
+
+func TestClaudeUsageRefresherClearsCooldownOnlyWhenEveryWindowHasRoom(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantCleared bool
+	}{
+		{
+			name:        "every window has room",
+			body:        `{"five_hour":null,"seven_day":{"utilization":0,"resets_at":"2099-01-01T00:00:00+00:00"},"seven_day_opus":{"utilization":40}}`,
+			wantCleared: true,
+		},
+		{
+			name: "weekly window still full",
+			body: `{"five_hour":{"utilization":10},"seven_day":{"utilization":100,"resets_at":"2099-01-01T00:00:00+00:00"}}`,
+		},
+		{
+			name: "per-model window still full",
+			body: `{"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00+00:00"},"seven_day_opus":{"utilization":100}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			ctx := context.Background()
+			manager := coreauth.NewManager(nil, nil, nil)
+			auth := &coreauth.Auth{
+				ID:       "claude-cooldown-" + strings.ReplaceAll(tt.name, " ", "-"),
+				Provider: "claude",
+				Metadata: map[string]any{"access_token": "tok", "expired": time.Now().Add(time.Hour).Format(time.RFC3339)},
+			}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5"}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+			if _, errRegister := manager.Register(coreauth.WithSkipPersist(ctx), auth); errRegister != nil {
+				t.Fatalf("Register: %v", errRegister)
+			}
+			retryAfter := 45 * time.Hour
+			manager.MarkResult(ctx, coreauth.Result{
+				AuthID:          auth.ID,
+				Provider:        "claude",
+				Model:           "claude-opus-5-5",
+				RetryAfter:      &retryAfter,
+				CredentialScope: true,
+				Error:           &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate_limit_error"},
+			})
+			before, _ := manager.GetByID(auth.ID)
+			if !before.Quota.Exceeded || before.Quota.Reason != "credential_quota" {
+				t.Fatalf("setup: quota = %+v, want active credential_quota cooldown", before.Quota)
+			}
+
+			refresher := newClaudeUsageRefresher(manager, func() *config.Config { return &config.Config{} })
+			refresher.usageURL = server.URL
+			refresher.refreshAll(ctx)
+
+			got, _ := manager.GetByID(auth.ID)
+			cleared := !got.Quota.Exceeded && got.Quota.NextRecoverAt.IsZero() && !got.Unavailable && got.Status == coreauth.StatusActive
+			if cleared != tt.wantCleared {
+				t.Fatalf("cleared = %v, want %v (quota=%+v unavailable=%v status=%v)", cleared, tt.wantCleared, got.Quota, got.Unavailable, got.Status)
+			}
+		})
 	}
 }

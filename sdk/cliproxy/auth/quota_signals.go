@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"maps"
 	"net/http"
 	"sort"
@@ -298,4 +299,40 @@ func (m *Manager) MergeQuotaSignals(id string, signals map[string]string, observ
 		m.scheduler.upsertAuth(snapshot)
 	}
 	return true
+}
+
+// ClearRecoveredCredentialQuota ends an active credential_quota cooldown on the
+// auth with the given id. Call it only when a usage poll newer than the
+// cooldown shows every quota window has room: the deadline taken from a 429's
+// Retry-After can outlive the limit, for example when the provider resets
+// usage early, and polling alone never clears it. The Retry-After and overall
+// Anthropic-Ratelimit-Unified-Status signals left by the rejected response are
+// dropped too. Auths with a terminal unauthorized failure are left alone. It
+// reports whether a cooldown was cleared.
+func (m *Manager) ClearRecoveredCredentialQuota(ctx context.Context, id string) (bool, error) {
+	if m == nil || id == "" {
+		return false, nil
+	}
+	now := time.Now()
+	releaseMutation := m.lockAuthMutation(id)
+	m.mu.Lock()
+	auth := m.auths[id]
+	if auth == nil || !auth.Quota.Exceeded || auth.Quota.Reason != "credential_quota" ||
+		!auth.Quota.NextRecoverAt.After(now) || hasUnauthorizedAuthFailure(auth) {
+		m.mu.Unlock()
+		releaseMutation()
+		return false, nil
+	}
+	if len(auth.Quota.Signals) > 0 {
+		signals := maps.Clone(auth.Quota.Signals)
+		delete(signals, "Retry-After")
+		delete(signals, "Anthropic-Ratelimit-Unified-Status")
+		auth.Quota.Signals = signals
+	}
+	m.mu.Unlock()
+	releaseMutation()
+	if _, _, errReset := m.ResetQuota(ctx, id); errReset != nil {
+		return true, errReset
+	}
+	return true, nil
 }

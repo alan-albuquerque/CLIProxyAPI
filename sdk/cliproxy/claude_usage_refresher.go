@@ -138,12 +138,20 @@ func (r *claudeUsageRefresher) refreshOne(ctx context.Context, auth *coreauth.Au
 	if errRead != nil {
 		return errRead
 	}
-	signals, errSignals := claudeUsageSignals(body)
+	signals, allowed, errSignals := claudeUsageSignals(body)
 	if errSignals != nil {
 		return errSignals
 	}
-	r.manager.MergeQuotaSignals(auth.ID, signals, startedAt)
-	return nil
+	// A failed merge means a response newer than this poll was observed; it may
+	// be the 429 that set the cooldown, so only a fresh poll may clear one.
+	if !r.manager.MergeQuotaSignals(auth.ID, signals, startedAt) || !allowed {
+		return nil
+	}
+	cleared, errClear := r.manager.ClearRecoveredCredentialQuota(ctx, auth.ID)
+	if cleared {
+		log.WithField("auth_id", auth.ID).Info("claude usage shows every window has room; cleared quota cooldown")
+	}
+	return errClear
 }
 
 type claudeUsageWindow struct {
@@ -153,18 +161,43 @@ type claudeUsageWindow struct {
 
 // claudeUsageSignals maps a usage response to the unified rate-limit signals
 // that Claude responses carry as Anthropic-Ratelimit-Unified-* headers.
-func claudeUsageSignals(body []byte) (map[string]string, error) {
-	var usage struct {
-		FiveHour *claudeUsageWindow `json:"five_hour"`
-		SevenDay *claudeUsageWindow `json:"seven_day"`
-	}
+// allowed reports whether at least one rate-limit window has a utilization and
+// every one that does is below 100%. Rate-limit windows are the five_hour* and
+// seven_day* keys, which include per-model weekly limits such as
+// seven_day_opus; extra (paid) usage is not a rate limit and is ignored.
+func claudeUsageSignals(body []byte) (signals map[string]string, allowed bool, err error) {
+	var usage map[string]json.RawMessage
 	if errDecode := json.Unmarshal(body, &usage); errDecode != nil {
-		return nil, fmt.Errorf("decode usage response: %w", errDecode)
+		return nil, false, fmt.Errorf("decode usage response: %w", errDecode)
 	}
-	signals := make(map[string]string)
-	addClaudeUsageWindow(signals, "Anthropic-Ratelimit-Unified-5h-", usage.FiveHour)
-	addClaudeUsageWindow(signals, "Anthropic-Ratelimit-Unified-7d-", usage.SevenDay)
-	return signals, nil
+	signals = make(map[string]string)
+	reported := false
+	allowed = true
+	for key, raw := range usage {
+		if !strings.HasPrefix(key, "five_hour") && !strings.HasPrefix(key, "seven_day") {
+			continue
+		}
+		var window *claudeUsageWindow
+		if errWindow := json.Unmarshal(raw, &window); errWindow != nil {
+			// An unknown shape cannot prove the window has room.
+			allowed = false
+			continue
+		}
+		switch key {
+		case "five_hour":
+			addClaudeUsageWindow(signals, "Anthropic-Ratelimit-Unified-5h-", window)
+		case "seven_day":
+			addClaudeUsageWindow(signals, "Anthropic-Ratelimit-Unified-7d-", window)
+		}
+		if window == nil || window.Utilization == nil {
+			continue
+		}
+		reported = true
+		if *window.Utilization >= 100 {
+			allowed = false
+		}
+	}
+	return signals, reported && allowed, nil
 }
 
 func addClaudeUsageWindow(signals map[string]string, prefix string, window *claudeUsageWindow) {
