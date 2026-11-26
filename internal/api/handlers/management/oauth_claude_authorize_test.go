@@ -135,7 +135,7 @@ func TestStartOAuthV8ClaudeUsesNativeAuthorizationParameters(t *testing.T) {
 	if got := parsed.Query().Get("state"); got != state {
 		t.Error("authorization URL did not preserve the generated state")
 	}
-	const wantScope = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	const wantScope = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins user:privacy_consents:write org:desktop_config"
 	if got := parsed.Query().Get("scope"); got != wantScope {
 		t.Errorf("authorization scope = %q, want %q", got, wantScope)
 	}

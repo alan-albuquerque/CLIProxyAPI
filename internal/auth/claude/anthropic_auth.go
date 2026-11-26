@@ -34,9 +34,10 @@ const (
 	RedirectURI      = "http://localhost:54545/callback"
 	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
-	// Native Claude Code includes the Console scope when authorizing a new login.
-	// Keep the established token refresh scope unchanged.
-	claudeOAuthAuthorizeScope = "org:create_api_key " + ClaudeOAuthScope
+	// Native Claude Code 2.1.332 includes the Console, plugins, privacy-consents,
+	// and desktop-config scopes when authorizing a new login. Keep the established
+	// token refresh scope unchanged so older 5-scope grants still renew.
+	claudeOAuthAuthorizeScope = "org:create_api_key " + ClaudeOAuthScope + " user:plugins user:privacy_consents:write org:desktop_config"
 
 	claudeRefreshMinBackoff       = 5 * time.Second
 	claudeRefreshMaxBackoff       = 5 * time.Minute
@@ -343,18 +344,20 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		scope = o.authorizeScope
 	}
 
-	params := url.Values{
-		"code":                  {"true"},
-		"client_id":             {ClientID},
-		"response_type":         {"code"},
-		"redirect_uri":          {RedirectURI},
-		"scope":                 {scope},
-		"code_challenge":        {pkceCodes.CodeChallenge},
-		"code_challenge_method": {"S256"},
-		"state":                 {state},
-	}
+	// Preserve the exact parameter order native Claude Code emits via URLSearchParams
+	// rather than url.Values.Encode(), which sorts keys alphabetically.
+	query := strings.Join([]string{
+		"code=true",
+		"client_id=" + url.QueryEscape(ClientID),
+		"response_type=code",
+		"redirect_uri=" + url.QueryEscape(RedirectURI),
+		"scope=" + url.QueryEscape(scope),
+		"code_challenge=" + url.QueryEscape(pkceCodes.CodeChallenge),
+		"code_challenge_method=S256",
+		"state=" + url.QueryEscape(state),
+	}, "&")
 
-	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())
+	authURL := fmt.Sprintf("%s?%s", AuthURL, query)
 	return authURL, state, nil
 }
 

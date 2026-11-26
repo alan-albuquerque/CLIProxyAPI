@@ -41,9 +41,13 @@ func TestGenerateAuthURLUsesNativeClaudeCodeScopes(t *testing.T) {
 	if errParse != nil {
 		t.Fatalf("parse authorization URL: %v", errParse)
 	}
-	const wantScope = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	const wantScope = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins user:privacy_consents:write org:desktop_config"
 	if got := parsed.Query().Get("scope"); got != wantScope {
 		t.Errorf("authorization scope = %q, want %q", got, wantScope)
+	}
+	const wantPrefix = "code=true&client_id=" + ClientID + "&response_type=code&redirect_uri="
+	if !strings.HasPrefix(parsed.RawQuery, wantPrefix) {
+		t.Errorf("authorization query = %q, want prefix %q", parsed.RawQuery, wantPrefix)
 	}
 	if returnedState != state || parsed.Query().Get("state") != state {
 		t.Error("authorization URL did not preserve the supplied state")
